@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import lru_cache
+from pathlib import Path
 import math
 import zlib
+import json
 
 import numpy as np
 
@@ -369,6 +371,47 @@ def decode_audio_to_text(audio: np.ndarray, settings: ModemSettings) -> tuple[st
             return payload_to_text(payload), ""
 
     return None, "No valid frame found. Check the device, frequencies, or gain."
+
+
+def settings_to_dict(settings: ModemSettings) -> dict:
+    """Convert ModemSettings to a JSON-serializable dict."""
+    return {
+        "sample_rate": settings.sample_rate,
+        "symbol_rate": settings.symbol_rate,
+        "freq_low": settings.freq_low,
+        "freq_high": settings.freq_high,
+        "amplitude": settings.amplitude,
+        "bit_repeat": settings.bit_repeat,
+        "sync_start_freq": settings.sync_start_freq,
+        "sync_end_freq": settings.sync_end_freq,
+        "sync_ms": settings.sync_ms,
+        "guard_silence_ms": settings.guard_silence_ms,
+        "lead_silence_ms": settings.lead_silence_ms,
+        "trail_silence_ms": settings.trail_silence_ms,
+        "max_payload_bytes": settings.max_payload_bytes,
+        "search_tolerance_samples": settings.search_tolerance_samples,
+        "live_buffer_seconds": settings.live_buffer_seconds,
+        "preview_hold_seconds": settings.preview_hold_seconds,
+    }
+
+def dict_to_settings(data: dict) -> ModemSettings:
+    """Create ModemSettings from a dict (with defaults for missing keys)."""
+    defaults = ModemSettings()
+    for key in defaults.__dataclass_fields__.keys():
+        if key not in data:
+            data[key] = getattr(defaults, key)
+    return ModemSettings(**data)
+
+def save_settings_to_file(settings: ModemSettings, path: str | Path) -> None:
+    """Save settings to a JSON file."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(settings_to_dict(settings), f, indent=2)
+
+def load_settings_from_file(path: str | Path) -> ModemSettings:
+    """Load settings from a JSON file."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return dict_to_settings(data)
 
 
 def decode_audio_file(path: str, settings: ModemSettings) -> tuple[str | None, str]:

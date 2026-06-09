@@ -218,7 +218,10 @@ class ReceiverApp:
 
         ttk.Separator(container).pack(fill=tk.X, pady=(10, 8))
         ttk.Label(container, textvariable=self.status_var).pack(anchor="w")
-
+        credit_frame = ttk.Frame(container)
+        credit_frame.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(credit_frame, text="Made by Aw", style="Subtitle.TLabel", foreground="#5a6378").pack(side=tk.RIGHT)
+            
     def _backend_note(self) -> str:
         if sounddevice_available():
             return "Audio backend: sounddevice / PortAudio"
@@ -315,14 +318,20 @@ class ReceiverApp:
             self.stop_button.configure(state="disabled")
 
     def open_settings(self) -> None:
-        updated = SettingsDialog(self.root, "Receiver Settings", self.settings, RECEIVER_FIELDS).show()
+        default_settings = clamp_settings(ModemSettings())
+        updated = SettingsDialog(
+            self.root,
+            "Receiver Settings",
+            self.settings,
+            default_settings,
+            RECEIVER_FIELDS
+        ).show()
         if updated is None:
             return
         self.settings = clamp_settings(updated)
         self.backend_var.set(self._backend_note())
         self.refresh_devices()
         self.status_var.set("Settings updated.")
-
     def toggle_preview(self) -> None:
         if self.preview_active:
             self.stop_preview()
