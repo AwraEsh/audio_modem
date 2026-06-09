@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 not found"
-  exit 1
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$ROOT_DIR/.venv"
+
+if [[ ! -d "$VENV_DIR" ]]; then
+  python3 -m venv "$VENV_DIR"
 fi
 
-if [ ! -d .venv ]; then
-  python3 -m venv .venv
-fi
+source "$VENV_DIR/bin/activate"
+python -m pip install --upgrade pip
+python -m pip install -r "$ROOT_DIR/requirements.txt"
 
-# shellcheck disable=SC1091
-source .venv/bin/activate
-python -m pip install --upgrade pip >/dev/null
-python -m pip install -r requirements.txt
-python launcher.py
+python "$ROOT_DIR/launcher.py"

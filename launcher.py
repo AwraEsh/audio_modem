@@ -18,28 +18,33 @@ def launch(script_name: str) -> None:
         subprocess.Popen([PYTHON, str(script)], cwd=str(ROOT))
 
 
-root = tk.Tk()
-root.title("Audio Modem")
-root.geometry("480x300")
-root.resizable(False, False)
+def main() -> None:
+    root = tk.Tk()
+    root.title("Audio Modem")
+    root.geometry("520x320")
+    root.resizable(False, False)
 
-configure_dark_theme(root)
+    configure_dark_theme(root)
 
-frame = ttk.Frame(root, padding=18)
-frame.pack(fill=tk.BOTH, expand=True)
+    frame = ttk.Frame(root, padding=18)
+    frame.pack(fill=tk.BOTH, expand=True)
 
-ttk.Label(frame, text="Audio Modem", style="Title.TLabel").pack(anchor="center", pady=(0, 8))
-ttk.Label(frame, text="Choose a mode. Everything stays local.", style="Subtitle.TLabel").pack(anchor="center")
+    ttk.Label(frame, text="Audio Modem", style="Title.TLabel").pack(anchor="center", pady=(0, 8))
+    ttk.Label(frame, text="Choose a mode. Everything stays local.", style="Subtitle.TLabel").pack(anchor="center")
 
-ttk.Button(frame, text="Text to Voice", command=lambda: launch("sender.py")).pack(fill=tk.X, pady=(24, 8))
-ttk.Button(frame, text="Voice to Text", command=lambda: launch("receiver.py")).pack(fill=tk.X, pady=8)
+    ttk.Button(frame, text="Text to Voice", command=lambda: launch("sender.py")).pack(fill=tk.X, pady=(24, 8))
+    ttk.Button(frame, text="Voice to Text", command=lambda: launch("receiver.py")).pack(fill=tk.X, pady=8)
 
-ttk.Label(
-    frame,
-    text="Tip: keep the transmitter and receiver close at first to validate the sync and levels.",
-    style="Subtitle.TLabel",
-    wraplength=410,
-    justify="center",
-).pack(anchor="center", pady=(20, 0))
+    ttk.Label(
+        frame,
+        text="Tip: use the same settings on both sides for the cleanest sync.\n\nMade by AwraEsh with Python and Tkinter.",
+        style="Subtitle.TLabel",
+        wraplength=450,
+        justify="center",
+    ).pack(anchor="center", pady=(20, 0))
 
-root.mainloop()
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,46 +1,100 @@
-"""Shared modem logic for the audio text ↔ voice demo."""
+"""Shared audio modem logic."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import lru_cache
 import math
 import zlib
 
 import numpy as np
 
-SAMPLE_RATE = 44_100
-BIT_DURATION = 0.020  # 20 ms per symbol -> 50 symbols/sec
-SYMBOL_SAMPLES = max(1, int(round(SAMPLE_RATE * BIT_DURATION)))
-
-# Two clean tones that fit an integer number of cycles in one symbol window.
-FREQ_0 = 1200.0
-FREQ_1 = 2200.0
-AMPLITUDE = 0.72
-
-# A sync word with decent bit balance.
-PREAMBLE_BITS = "11010011101100101011001011100101"  # 32 bits
-PREAMBLE_MIN_MATCH = 22  # tolerate a few errors in the sync word
-
-LEAD_SILENCE_SEC = 0.16
-TRAIL_SILENCE_SEC = 0.12
-
-_WINDOW = np.hanning(SYMBOL_SAMPLES).astype(np.float64)
-_TONE_CACHE: dict[float, np.ndarray] = {}
-_DEMOD_CACHE: dict[float, np.ndarray] = {}
+DEFAULT_SAMPLE_RATE = 44_100
 
 
 @dataclass(frozen=True)
-class FrameDecodeResult:
-    text: str | None
-    error: str
-    confidence: float = 0.0
+class ModemSettings:
+    sample_rate: int = DEFAULT_SAMPLE_RATE
+    symbol_rate: float = 100.0
+    freq_low: float = 1200.0
+    freq_high: float = 2200.0
+    amplitude: float = 0.72
+    bit_repeat: int = 2
+    sync_start_freq: float = 800.0
+    sync_end_freq: float = 2800.0
+    sync_ms: float = 180.0
+    guard_silence_ms: float = 20.0
+    lead_silence_ms: float = 120.0
+    trail_silence_ms: float = 120.0
+    max_payload_bytes: int = 65535
+    search_tolerance_samples: int = 8  # small wiggle room after sync lock
+    live_buffer_seconds: float = 12.0
+    preview_hold_seconds: float = 0.8
+
+    @property
+    def symbol_samples(self) -> int:
+        return max(1, int(round(self.sample_rate / self.symbol_rate)))
+
+    @property
+    def bit_repeat_factor(self) -> int:
+        return max(1, int(self.bit_repeat))
+
+    @property
+    def sync_samples(self) -> int:
+        return max(1, int(round(self.sample_rate * self.sync_ms / 1000.0)))
+
+    @property
+    def guard_silence_samples(self) -> int:
+        return max(0, int(round(self.sample_rate * self.guard_silence_ms / 1000.0)))
+
+    @property
+    def lead_silence_samples(self) -> int:
+        return max(0, int(round(self.sample_rate * self.lead_silence_ms / 1000.0)))
+
+    @property
+    def trail_silence_samples(self) -> int:
+        return max(0, int(round(self.sample_rate * self.trail_silence_ms / 1000.0)))
+
+
+def clamp_settings(settings: ModemSettings) -> ModemSettings:
+    symbol_rate = float(min(max(settings.symbol_rate, 10.0), 250.0))
+    f0 = float(min(max(settings.freq_low, 80.0), settings.sample_rate / 2.5))
+    f1 = float(min(max(settings.freq_high, 80.0), settings.sample_rate / 2.5))
+    if abs(f1 - f0) < 100.0:
+        f1 = f0 + 100.0
+
+    amp = float(min(max(settings.amplitude, 0.05), 0.95))
+    repeat = int(min(max(settings.bit_repeat, 1), 8))
+    start_freq = float(min(max(settings.sync_start_freq, 80.0), settings.sample_rate / 2.5))
+    end_freq = float(min(max(settings.sync_end_freq, 80.0), settings.sample_rate / 2.5))
+    sync_ms = float(min(max(settings.sync_ms, 40.0), 800.0))
+    guard = float(min(max(settings.guard_silence_ms, 0.0), 300.0))
+    lead = float(min(max(settings.lead_silence_ms, 0.0), 800.0))
+    trail = float(min(max(settings.trail_silence_ms, 0.0), 800.0))
+    search = int(min(max(settings.search_tolerance_samples, 0), 64))
+
+    return replace(
+        settings,
+        symbol_rate=symbol_rate,
+        freq_low=f0,
+        freq_high=f1,
+        amplitude=amp,
+        bit_repeat=repeat,
+        sync_start_freq=start_freq,
+        sync_end_freq=end_freq,
+        sync_ms=sync_ms,
+        guard_silence_ms=guard,
+        lead_silence_ms=lead,
+        trail_silence_ms=trail,
+        search_tolerance_samples=search,
+    )
 
 
 def text_to_payload(text: str) -> bytes:
     return text.encode("utf-8")
 
 
-def payload_to_text(data: bytes) -> str:
-    return data.decode("utf-8", errors="replace")
+def payload_to_text(payload: bytes) -> str:
+    return payload.decode("utf-8", errors="replace")
 
 
 def bytes_to_bits(data: bytes) -> str:
@@ -57,66 +111,178 @@ def bits_to_bytes(bits: str) -> bytes:
     return bytes(out)
 
 
-def build_frame_bits(payload: bytes) -> str:
-    """Frame format: preamble + 16-bit length + payload + 32-bit CRC32."""
+def _collapse_repeated_bits(bits: str, repeat: int) -> str:
+    repeat = max(1, int(repeat))
+    if repeat <= 1:
+        return bits
+    usable = len(bits) - (len(bits) % repeat)
+    out: list[str] = []
+    for pos in range(0, usable, repeat):
+        chunk = bits[pos : pos + repeat]
+        out.append("1" if chunk.count("1") >= chunk.count("0") else "0")
+    return "".join(out)
+
+
+def build_frame_bits(payload: bytes, settings: ModemSettings) -> str:
+    settings = clamp_settings(settings)
     length = len(payload).to_bytes(2, "big")
     crc = zlib.crc32(payload).to_bytes(4, "big")
-    return PREAMBLE_BITS + bytes_to_bits(length) + bytes_to_bits(payload) + bytes_to_bits(crc)
+    frame = bytes_to_bits(length) + bytes_to_bits(payload) + bytes_to_bits(crc)
+    repeat = settings.bit_repeat_factor
+    return "".join(bit * repeat for bit in frame)
 
 
-def _tone(freq: float) -> np.ndarray:
-    cached = _TONE_CACHE.get(freq)
-    if cached is not None:
-        return cached
+@lru_cache(maxsize=64)
+def _tone_cache(sample_rate: int, symbol_samples: int, freq: float, amplitude: float) -> np.ndarray:
+    t = np.arange(symbol_samples, dtype=np.float64) / float(sample_rate)
+    wave = np.sin(2.0 * math.pi * freq * t)
 
-    t = np.arange(SYMBOL_SAMPLES, dtype=np.float64) / SAMPLE_RATE
-    tone = np.sin(2.0 * math.pi * freq * t)
-
-    # Small fade at the edges reduces clicks and helps the capture chain.
-    fade_len = max(1, int(round(0.002 * SAMPLE_RATE)))
-    fade_len = min(fade_len, SYMBOL_SAMPLES // 2)
+    fade_len = max(1, int(round(sample_rate * 0.002)))
+    fade_len = min(fade_len, symbol_samples // 2)
     if fade_len > 1:
-        fade = np.ones(SYMBOL_SAMPLES, dtype=np.float64)
+        fade = np.ones(symbol_samples, dtype=np.float64)
         ramp = np.linspace(0.0, 1.0, fade_len, endpoint=False)
         fade[:fade_len] = ramp
         fade[-fade_len:] = ramp[::-1]
-        tone *= fade
+        wave *= fade
 
-    tone = (AMPLITUDE * tone).astype(np.float32)
-    _TONE_CACHE[freq] = tone
-    return tone
+    return (amplitude * wave).astype(np.float32)
 
 
-_TONE_0 = _tone(FREQ_0)
-_TONE_1 = _tone(FREQ_1)
-_DEMOD_0 = (_WINDOW * _TONE_0.astype(np.float64)).astype(np.float64)
-_DEMOD_1 = (_WINDOW * _TONE_1.astype(np.float64)).astype(np.float64)
-_LEAD_SILENCE = np.zeros(int(round(LEAD_SILENCE_SEC * SAMPLE_RATE)), dtype=np.float32)
-_TRAIL_SILENCE = np.zeros(int(round(TRAIL_SILENCE_SEC * SAMPLE_RATE)), dtype=np.float32)
+def _template_for(settings: ModemSettings, freq: float) -> np.ndarray:
+    settings = clamp_settings(settings)
+    return _tone_cache(settings.sample_rate, settings.symbol_samples, float(freq), float(settings.amplitude))
 
 
-def bits_to_audio(bits: str) -> np.ndarray:
-    parts: list[np.ndarray] = [_LEAD_SILENCE]
+@lru_cache(maxsize=32)
+def _sync_chirp(sample_rate: int, duration_samples: int, amplitude: float, start_freq: float, end_freq: float) -> np.ndarray:
+    duration_samples = max(1, int(duration_samples))
+    t = np.arange(duration_samples, dtype=np.float64) / float(sample_rate)
+    duration = duration_samples / float(sample_rate)
+    slope = (end_freq - start_freq) / max(duration, 1e-9)
+    phase = 2.0 * math.pi * (start_freq * t + 0.5 * slope * t * t)
+    wave = np.sin(phase)
+
+    fade_len = max(1, int(round(sample_rate * 0.004)))
+    fade_len = min(fade_len, duration_samples // 2)
+    if fade_len > 1:
+        fade = np.ones(duration_samples, dtype=np.float64)
+        ramp = np.linspace(0.0, 1.0, fade_len, endpoint=False)
+        fade[:fade_len] = ramp
+        fade[-fade_len:] = ramp[::-1]
+        wave *= fade
+
+    return (amplitude * wave).astype(np.float32)
+
+
+def _sync_template(settings: ModemSettings) -> np.ndarray:
+    settings = clamp_settings(settings)
+    return _sync_chirp(
+        settings.sample_rate,
+        settings.sync_samples,
+        settings.amplitude,
+        settings.sync_start_freq,
+        settings.sync_end_freq,
+    )
+
+
+def bits_to_audio(bits: str, settings: ModemSettings) -> np.ndarray:
+    settings = clamp_settings(settings)
+    low = _template_for(settings, settings.freq_low)
+    high = _template_for(settings, settings.freq_high)
+    sync = _sync_template(settings)
+
+    parts: list[np.ndarray] = []
+    if settings.lead_silence_samples:
+        parts.append(np.zeros(settings.lead_silence_samples, dtype=np.float32))
+    parts.append(sync)
+    if settings.guard_silence_samples:
+        parts.append(np.zeros(settings.guard_silence_samples, dtype=np.float32))
+
     for bit in bits:
-        parts.append(_TONE_1 if bit == "1" else _TONE_0)
-    parts.append(_TRAIL_SILENCE)
-    return np.concatenate(parts)
+        parts.append(high if bit == "1" else low)
+
+    if settings.trail_silence_samples:
+        parts.append(np.zeros(settings.trail_silence_samples, dtype=np.float32))
+
+    return np.concatenate(parts).astype(np.float32, copy=False) if parts else np.zeros(0, dtype=np.float32)
 
 
-def _trim_silence(audio: np.ndarray) -> np.ndarray:
+def encode_text_to_audio(text: str, settings: ModemSettings) -> tuple[np.ndarray, str]:
+    payload = text_to_payload(text)
+    bits = build_frame_bits(payload, settings)
+    return bits_to_audio(bits, settings), bits
+
+
+def _as_mono(audio: np.ndarray) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
+    return np.nan_to_num(audio, copy=False)
+
+
+def _fft_valid_correlate(x: np.ndarray, h: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    h = np.asarray(h, dtype=np.float64)
+    if x.size < h.size:
+        return np.empty(0, dtype=np.float64)
+    n = x.size + h.size - 1
+    size = 1 << (n - 1).bit_length()
+    X = np.fft.rfft(x, size)
+    H = np.fft.rfft(h[::-1], size)
+    y = np.fft.irfft(X * H, size)[:n]
+    start = h.size - 1
+    stop = start + x.size - h.size + 1
+    return y[start:stop]
+
+
+def _moving_energy(audio: np.ndarray, window: int) -> np.ndarray:
+    if audio.size < window:
+        return np.zeros(0, dtype=np.float64)
+    squared = np.square(audio.astype(np.float64, copy=False))
+    cumsum = np.cumsum(np.insert(squared, 0, 0.0))
+    return cumsum[window:] - cumsum[:-window]
+
+
+def audio_to_bits(audio: np.ndarray, settings: ModemSettings) -> tuple[str, np.ndarray, np.ndarray]:
+    settings = clamp_settings(settings)
+    audio = _as_mono(audio)
+    if audio.size < settings.symbol_samples:
+        return "", np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    peak = float(np.max(np.abs(audio)))
+    if peak > 0.0:
+        audio = audio / peak
+
+    tone0 = _template_for(settings, settings.freq_low).astype(np.float64, copy=False)
+    tone1 = _template_for(settings, settings.freq_high).astype(np.float64, copy=False)
+    corr0 = _fft_valid_correlate(audio, tone0)
+    corr1 = _fft_valid_correlate(audio, tone1)
+    return _decode_raw_bits(corr0, corr1, settings), corr0, corr1
+
+
+def _decode_raw_bits(corr0: np.ndarray, corr1: np.ndarray, settings: ModemSettings) -> str:
+    diff = corr1 - corr0
+    positions = np.arange(0, diff.size, settings.symbol_samples, dtype=np.int64)
+    if positions.size == 0:
+        return ""
+    bits = np.where(diff[positions] >= 0.0, "1", "0")
+    return "".join(bits.tolist())
+
+
+def _trim_silence(audio: np.ndarray, *, settings: ModemSettings) -> np.ndarray:
     if audio.size == 0:
         return audio
-
     peak = float(np.max(np.abs(audio)))
     if peak <= 0.0:
         return np.empty(0, dtype=np.float32)
 
     audio = audio / peak
-    if audio.size < 1024:
+    if audio.size < settings.symbol_samples * 4:
         return audio.astype(np.float32, copy=False)
 
-    envelope_window = max(128, SYMBOL_SAMPLES // 4)
-    kernel = np.ones(envelope_window, dtype=np.float64) / envelope_window
+    window = max(128, settings.symbol_samples // 4)
+    kernel = np.ones(window, dtype=np.float64) / window
     envelope = np.convolve(np.abs(audio), kernel, mode="same")
 
     threshold = 0.02
@@ -124,184 +290,95 @@ def _trim_silence(audio: np.ndarray) -> np.ndarray:
     if active.size == 0:
         return audio.astype(np.float32, copy=False)
 
-    # Keep a tiny pre-roll only. Too much silence pushes the sync word outside the
-    # one-symbol search window, which makes decode look "dead" even when the tone is there.
-    leading_margin = max(1, int(round(0.003 * SAMPLE_RATE)))
-    trailing_margin = max(SYMBOL_SAMPLES * 2, int(round(0.060 * SAMPLE_RATE)))
-    start = max(0, int(active[0]) - leading_margin)
-    end = min(audio.size, int(active[-1]) + trailing_margin)
+    margin = settings.symbol_samples * 2
+    start = max(0, int(active[0]) - margin)
+    end = min(audio.size, int(active[-1]) + margin)
     return audio[start:end].astype(np.float32, copy=False)
 
 
-def _symbol_energy(block: np.ndarray) -> tuple[float, float]:
-    block = np.asarray(block, dtype=np.float64)
-    if block.size == 0:
-        return 0.0, 0.0
+def parse_frame_bits(bits: str, settings: ModemSettings) -> tuple[bytes | None, str]:
+    settings = clamp_settings(settings)
+    if len(bits) < 16 + 32:
+        return None, "Frame is too short to contain the header and CRC."
 
-    block = block - np.mean(block)
-    block *= _WINDOW[: block.size]
+    payload_len = int(bits[:16], 2)
+    if payload_len <= 0 or payload_len > settings.max_payload_bytes:
+        return None, "Invalid payload length."
 
-    # Vectorized dot products are fast and stable enough for this small modem.
-    p0 = float(np.dot(block, _DEMOD_0[: block.size]))
-    p1 = float(np.dot(block, _DEMOD_1[: block.size]))
-    return p0 * p0, p1 * p1
+    payload_end = 16 + payload_len * 8
+    crc_end = payload_end + 32
+    if crc_end > len(bits):
+        have = max(0, (len(bits) - 16) // 8)
+        return None, f"Frame is incomplete. Expected {payload_len} byte(s), captured {have}."
 
+    payload = bits_to_bytes(bits[16:payload_end])
+    expected_crc = int(bits[payload_end:crc_end], 2)
+    actual_crc = zlib.crc32(payload) & 0xFFFFFFFF
+    if actual_crc != expected_crc:
+        return None, "CRC check failed. The capture is probably noisy or the settings do not match."
 
-def detect_bit(block: np.ndarray) -> tuple[str, float]:
-    if block.size == 0:
-        return "0", 0.0
-
-    p0, p1 = _symbol_energy(block)
-    if p0 <= 0.0 and p1 <= 0.0:
-        return "0", 0.0
-
-    winner = "1" if p1 > p0 else "0"
-    confidence = abs(p1 - p0) / max(p0, p1, 1e-12)
-    return winner, float(confidence)
+    return payload, ""
 
 
-def _best_symbol_offset(audio: np.ndarray) -> tuple[int, float]:
-    preamble_len = len(PREAMBLE_BITS)
-    max_offset = min(SYMBOL_SAMPLES, max(1, audio.size - preamble_len * SYMBOL_SAMPLES))
-
-    best_offset = 0
-    best_score = float("-inf")
-
-    for offset in range(max_offset):
-        pos = offset
-        score = 0.0
-        for expected in PREAMBLE_BITS:
-            block = audio[pos : pos + SYMBOL_SAMPLES]
-            if block.size < SYMBOL_SAMPLES:
-                break
-            bit, confidence = detect_bit(block)
-            score += confidence if bit == expected else -confidence
-            pos += SYMBOL_SAMPLES
-
-        if score > best_score:
-            best_score = score
-            best_offset = offset
-
-    return best_offset, best_score
+def _find_sync_start(audio: np.ndarray, settings: ModemSettings) -> int | None:
+    sync = _sync_template(settings).astype(np.float64, copy=False)
+    corr = _fft_valid_correlate(audio, sync)
+    if corr.size == 0:
+        return None
+    candidates = np.argpartition(corr, -8)[-8:]
+    candidates = candidates[np.argsort(corr[candidates])[::-1]]
+    return int(candidates[0])
 
 
-def audio_to_bits(audio: np.ndarray) -> str:
-    """Convert a waveform into a bit stream."""
-    if audio.ndim > 1:
-        audio = np.mean(audio, axis=1)
-
-    audio = np.asarray(audio, dtype=np.float32)
-    audio = np.nan_to_num(audio, copy=False)
-
-    if audio.size == 0:
-        return ""
-
-    audio = _trim_silence(audio)
-    if audio.size < SYMBOL_SAMPLES:
-        return ""
+def decode_audio_to_text(audio: np.ndarray, settings: ModemSettings) -> tuple[str | None, str]:
+    settings = clamp_settings(settings)
+    audio = _as_mono(audio)
+    if audio.size < settings.symbol_samples:
+        return None, "No bits were decoded from the selected audio."
 
     peak = float(np.max(np.abs(audio)))
     if peak > 0.0:
         audio = audio / peak
 
-    best_offset, best_score = _best_symbol_offset(audio)
-    if not np.isfinite(best_score):
-        return ""
+    tone0 = _template_for(settings, settings.freq_low).astype(np.float64, copy=False)
+    tone1 = _template_for(settings, settings.freq_high).astype(np.float64, copy=False)
+    corr0 = _fft_valid_correlate(audio, tone0)
+    corr1 = _fft_valid_correlate(audio, tone1)
+    diff = corr1 - corr0
 
-    # If the alignment is completely off, do not invent garbage.
-    if best_score < (len(PREAMBLE_BITS) * 0.22):
-        return ""
+    sync_start = _find_sync_start(audio, settings)
+    if sync_start is None:
+        return None, "No sync burst was found."
 
-    bits: list[str] = []
-    pos = best_offset
-    while pos + SYMBOL_SAMPLES <= audio.size:
-        bit, _confidence = detect_bit(audio[pos : pos + SYMBOL_SAMPLES])
-        bits.append(bit)
-        pos += SYMBOL_SAMPLES
-    return "".join(bits)
+    base = sync_start + settings.sync_samples + settings.guard_silence_samples
+    candidates = range(max(0, base - settings.search_tolerance_samples), base + settings.search_tolerance_samples + 1)
 
-
-def _find_frame_candidates(bits: str) -> list[tuple[int, int]]:
-    preamble = PREAMBLE_BITS
-    plen = len(preamble)
-    if len(bits) < plen + 16 + 32:
-        return []
-
-    candidates: list[tuple[int, int]] = []
-    search_end = len(bits) - (plen + 16 + 32)
-    for start in range(search_end + 1):
-        window = bits[start : start + plen]
-        score = sum(1 for a, b in zip(window, preamble) if a == b)
-        if score < PREAMBLE_MIN_MATCH:
+    tried: set[int] = set()
+    for start in candidates:
+        if start in tried:
             continue
-        candidates.append((start, score))
+        tried.add(start)
+        raw_bits = _decode_raw_bits(
+            corr0[start:],
+            corr1[start:],
+            settings,
+        )
+        bits = _collapse_repeated_bits(raw_bits, settings.bit_repeat_factor)
+        payload, error = parse_frame_bits(bits, settings)
+        if payload is not None and error == "":
+            return payload_to_text(payload), ""
 
-    candidates.sort(key=lambda item: item[1], reverse=True)
-    return candidates
-
-
-def parse_frame_bits(bits: str) -> tuple[bytes, str]:
-    """Return (payload, error_message). On success, error_message is empty."""
-    if not bits:
-        return b"", "No bits were decoded."
-
-    candidates = _find_frame_candidates(bits)
-    if not candidates:
-        return b"", "Sync word not found. Check the selected device, gain, or alignment."
-
-    max_reasonable_payload = 8192
-    saw_sync = False
-    saw_crc_problem = False
-    saw_incomplete = False
-
-    for start, _score in candidates:
-        saw_sync = True
-        sync_start = start + len(PREAMBLE_BITS)
-        if len(bits) < sync_start + 16:
-            saw_incomplete = True
-            continue
-
-        payload_len = int(bits[sync_start : sync_start + 16], 2)
-        if payload_len <= 0 or payload_len > max_reasonable_payload:
-            continue
-
-        payload_start = sync_start + 16
-        payload_end = payload_start + payload_len * 8
-        crc_end = payload_end + 32
-
-        if len(bits) < crc_end:
-            saw_incomplete = True
-            continue
-
-        payload_bits = bits[payload_start:payload_end]
-        crc_bits = bits[payload_end:crc_end]
-        payload = bits_to_bytes(payload_bits)
-
-        expected_crc = int(crc_bits, 2)
-        actual_crc = zlib.crc32(payload) & 0xFFFFFFFF
-        if actual_crc != expected_crc:
-            saw_crc_problem = True
-            continue
-
-        return payload, ""
-
-    if saw_crc_problem:
-        return b"", "CRC check failed. The capture is probably noisy or the device gain is off."
-    if saw_incomplete:
-        return b"", "Frame is incomplete. Keep recording a little longer and try again."
-    if saw_sync:
-        return b"", "Sync word found, but no valid frame could be parsed."
-    return b"", "Sync word not found. Check the selected device, gain, or alignment."
+    return None, "No valid frame found. Check the device, frequencies, or gain."
 
 
-def decode_audio_to_text(audio: np.ndarray) -> tuple[str | None, str]:
-    bits = audio_to_bits(audio)
-    payload, error = parse_frame_bits(bits)
-    if error:
-        return None, error
-    return payload_to_text(payload), ""
+def decode_audio_file(path: str, settings: ModemSettings) -> tuple[str | None, str]:
+    from audio_backend import read_wav_file
+    audio = read_wav_file(path)
+    return decode_audio_to_text(audio, settings)
 
 
-def summarize_audio_length(audio: np.ndarray) -> str:
-    seconds = audio.shape[0] / SAMPLE_RATE if audio.size else 0.0
+def summarize_audio_length(audio: np.ndarray, sample_rate: int = DEFAULT_SAMPLE_RATE) -> str:
+    seconds = float(len(audio)) / float(sample_rate) if sample_rate else 0.0
+    if seconds < 1.0:
+        return f"{len(audio)} samples"
     return f"{seconds:.2f} s"
