@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import tkinter as tk
-from tkinter import messagebox
 from pathlib import Path
+import tkinter as tk
+from tkinter import ttk
 
 ROOT = Path(__file__).resolve().parent
 PYTHON = sys.executable
@@ -13,28 +13,39 @@ PYTHON = sys.executable
 def launch(script_name: str) -> None:
     script = ROOT / script_name
     if not script.exists():
-        messagebox.showerror("Missing file", f"{script_name} not found.")
         return
-    try:
-        subprocess.Popen([PYTHON, str(script)], cwd=str(ROOT))
-    except Exception as exc:  # pragma: no cover
-        messagebox.showerror("Launch failed", str(exc))
+    subprocess.Popen([PYTHON, str(script)], cwd=str(ROOT))
 
 
 root = tk.Tk()
-root.title("Audio Modem Launcher")
-root.geometry("360x200")
+root.title("Audio Modem")
+root.geometry("420x260")
 root.resizable(False, False)
 
-frame = tk.Frame(root, padx=18, pady=18)
+style = ttk.Style()
+try:
+    style.theme_use("clam")
+except Exception:
+    pass
+style.configure("Title.TLabel", font=("Arial", 18, "bold"))
+style.configure("Subtitle.TLabel", font=("Arial", 10))
+style.configure("TButton", padding=(12, 8))
+
+frame = ttk.Frame(root, padding=18)
 frame.pack(fill=tk.BOTH, expand=True)
 
-tk.Label(frame, text="Audio Modem", font=("Arial", 18, "bold")).pack(pady=(0, 10))
-tk.Label(frame, text="Choose a mode:", font=("Arial", 11)).pack(pady=(0, 12))
+ttk.Label(frame, text="Audio Modem", style="Title.TLabel").pack(anchor="center", pady=(0, 6))
+ttk.Label(
+    frame,
+    text="Choose a mode. Everything stays local.",
+    style="Subtitle.TLabel",
+).pack(anchor="center", pady=(0, 18))
 
-tk.Button(frame, text="Text → Voice", width=18, command=lambda: launch("sender.py")).pack(pady=4)
-tk.Button(frame, text="Voice → Text", width=18, command=lambda: launch("receiver.py")).pack(pady=4)
+ttk.Button(frame, text="Text to Voice", command=lambda: launch("sender.py")).pack(fill=tk.X, pady=6)
+ttk.Button(frame, text="Voice to Text", command=lambda: launch("receiver.py")).pack(fill=tk.X, pady=6)
 
-tk.Label(frame, text="Everything stays local.", font=("Arial", 9)).pack(pady=(14, 0))
+ttk.Label(frame, text="Tip: device selection appears when sounddevice/PortAudio is available.", style="Subtitle.TLabel").pack(
+    anchor="center", pady=(18, 0)
+)
 
 root.mainloop()

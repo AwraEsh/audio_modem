@@ -9,7 +9,6 @@ import tempfile
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -18,6 +17,77 @@ SAMPLE_RATE = 44100
 
 class AudioBackendError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AudioDevice:
+    id: int
+    name: str
+    max_input_channels: int
+    max_output_channels: int
+    hostapi: str = ""
+
+    @property
+    def supports_input(self) -> bool:
+        return self.max_input_channels > 0
+
+    @property
+    def supports_output(self) -> bool:
+        return self.max_output_channels > 0
+
+    def label(self) -> str:
+        role = []
+        if self.supports_input:
+            role.append("in")
+        if self.supports_output:
+            role.append("out")
+        role_text = "/".join(role) if role else "io"
+        host = f" [{self.hostapi}]" if self.hostapi else ""
+        return f"{self.id}: {self.name} ({role_text}){host}"
+
+
+def _load_sounddevice():
+    try:
+        import sounddevice as sd
+    except Exception:
+        return None
+    return sd
+
+
+def sounddevice_available() -> bool:
+    return _load_sounddevice() is not None
+
+
+def list_audio_devices() -> list[AudioDevice]:
+    sd = _load_sounddevice()
+    if sd is None:
+        return []
+
+    devices: list[AudioDevice] = []
+    hostapis = sd.query_hostapis()
+    for index, info in enumerate(sd.query_devices()):
+        hostapi_name = ""
+        hostapi_index = info.get("hostapi")
+        if hostapi_index is not None and 0 <= hostapi_index < len(hostapis):
+            hostapi_name = str(hostapis[hostapi_index].get("name", ""))
+        devices.append(
+            AudioDevice(
+                id=index,
+                name=str(info.get("name", f"Device {index}")),
+                max_input_channels=int(info.get("max_input_channels", 0)),
+                max_output_channels=int(info.get("max_output_channels", 0)),
+                hostapi=hostapi_name,
+            )
+        )
+    return devices
+
+
+def list_input_devices() -> list[AudioDevice]:
+    return [device for device in list_audio_devices() if device.supports_input]
+
+
+def list_output_devices() -> list[AudioDevice]:
+    return [device for device in list_audio_devices() if device.supports_output]
 
 
 def _audio_to_int16(audio: np.ndarray) -> np.ndarray:
@@ -43,7 +113,6 @@ def read_wav(path: str | Path) -> np.ndarray:
     with wave.open(path, "rb") as wf:
         channels = wf.getnchannels()
         sampwidth = wf.getsampwidth()
-        framerate = wf.getframerate()
         frames = wf.readframes(wf.getnframes())
 
     if sampwidth != 2:
@@ -55,17 +124,10 @@ def read_wav(path: str | Path) -> np.ndarray:
     return audio
 
 
-def _have_sounddevice() -> bool:
-    try:
-        import sounddevice as _sd  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
 @dataclass
 class Recorder:
     samplerate: int = SAMPLE_RATE
+    device: int | None = None
 
     def __post_init__(self) -> None:
         self._mode: str = ""
@@ -77,9 +139,8 @@ class Recorder:
         self._choose_backend()
 
     def _choose_backend(self) -> None:
-        if _have_sounddevice():
-            import sounddevice as sd
-
+        sd = _load_sounddevice()
+        if sd is not None:
             self._mode = "sounddevice"
             self._sd = sd
             return
@@ -105,7 +166,10 @@ class Recorder:
                     pass
                 self._frames.append(indata.copy())
 
-            self._stream = self._sd.InputStream(channels=1, samplerate=self.samplerate, callback=_callback)
+            kwargs = dict(channels=1, samplerate=self.samplerate, callback=_callback)
+            if self.device is not None:
+                kwargs["device"] = self.device
+            self._stream = self._sd.InputStream(**kwargs)
             self._stream.start()
             return
 
@@ -114,7 +178,6 @@ class Recorder:
             os.close(fd)
             self._temp_path = Path(temp_name)
 
-            # Prefer PulseAudio / PipeWire. If that fails, the process will later fail and we can report it.
             cmd = [
                 "ffmpeg",
                 "-hide_banner",
@@ -165,7 +228,6 @@ class Recorder:
                 self._proc = None
 
             if not self._temp_path.exists() or self._temp_path.stat().st_size == 0:
-                path = self._temp_path
                 self._temp_path = None
                 raise AudioBackendError(
                     "Recording backend did not produce audio. On Linux, ffmpeg needs access to your default microphone source."
@@ -181,11 +243,13 @@ class Recorder:
         raise AudioBackendError(f"Unsupported recording backend: {self._mode}")
 
 
-def play_audio(audio: np.ndarray, samplerate: int = SAMPLE_RATE) -> str:
-    if _have_sounddevice():
-        import sounddevice as sd
-
-        sd.play(audio, samplerate=samplerate, blocking=True)
+def play_audio(audio: np.ndarray, samplerate: int = SAMPLE_RATE, device: int | None = None) -> str:
+    sd = _load_sounddevice()
+    if sd is not None:
+        kwargs = dict(samplerate=samplerate, blocking=True)
+        if device is not None:
+            kwargs["device"] = device
+        sd.play(audio, **kwargs)
         return "sounddevice"
 
     if sys.platform.startswith("linux"):

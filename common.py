@@ -2,20 +2,19 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Tuple
+import zlib
 
 import numpy as np
 
 SAMPLE_RATE = 44100
-BIT_DURATION = 0.02  # 20 ms per bit -> 50 bps
+BIT_DURATION = 0.025  # 25 ms per bit -> 40 bps
 SYMBOL_SAMPLES = int(round(SAMPLE_RATE * BIT_DURATION))
 
 FREQ_0 = 1200.0
 FREQ_1 = 2200.0
 AMPLITUDE = 0.75
-PREAMBLE_BITS = "01010101010101010101010101010101"  # 32 bits
-GUARD_SILENCE_SEC = 0.15
+PREAMBLE_BITS = "101010101010101010101010101010101010101010101010"  # 48 bits
+GUARD_SILENCE_SEC = 0.20
 
 
 def text_to_payload(text: str) -> bytes:
@@ -39,8 +38,10 @@ def bits_to_bytes(bits: str) -> bytes:
 
 
 def build_frame_bits(payload: bytes) -> str:
+    """Frame layout: preamble + length(2 bytes) + payload + crc32(4 bytes)."""
     length = len(payload).to_bytes(2, "big")
-    framed = PREAMBLE_BITS + bytes_to_bits(length) + bytes_to_bits(payload)
+    crc = zlib.crc32(payload).to_bytes(4, "big")
+    framed = PREAMBLE_BITS + bytes_to_bits(length) + bytes_to_bits(payload) + bytes_to_bits(crc)
     return framed
 
 
@@ -48,24 +49,35 @@ def parse_frame_bits(bits: str) -> tuple[bytes, str]:
     """Return (payload, error_message). On success, error_message is empty."""
     preamble_index = bits.find(PREAMBLE_BITS)
     if preamble_index < 0:
-        return b"", "پیش‌دنباله پیدا نشد. احتمالاً صدا ضعیف بوده یا هم‌زمانی بیت‌ها به هم خورده."
+        return b"", "Preamble not found. The audio may be too quiet, clipped, or misaligned."
 
     start = preamble_index + len(PREAMBLE_BITS)
     if len(bits) < start + 16:
-        return b"", "فریم کامل نیست. طول پیام خوانده نشد."
+        return b"", "Incomplete frame. Could not read the message length."
 
     length_bits = bits[start : start + 16]
     payload_len = int(length_bits, 2)
     payload_start = start + 16
     payload_end = payload_start + payload_len * 8
-    if len(bits) < payload_end:
+    crc_end = payload_end + 32
+    if len(bits) < crc_end:
+        available_bytes = max(0, (len(bits) - payload_start) // 8)
         return b"", (
-            f"فریم ناقص است. انتظار داشتم {payload_len} بایت داده باشد، "
-            f"ولی فقط {max(0, (len(bits) - payload_start) // 8)} بایت دیده شد."
+            f"Incomplete frame. Expected {payload_len} payload bytes, "
+            f"but only {available_bytes} bytes were captured."
         )
 
     payload_bits = bits[payload_start:payload_end]
-    return bits_to_bytes(payload_bits), ""
+    crc_bits = bits[payload_end:crc_end]
+    payload = bits_to_bytes(payload_bits)
+    expected_crc = int(crc_bits, 2)
+    actual_crc = zlib.crc32(payload) & 0xFFFFFFFF
+    if actual_crc != expected_crc:
+        return b"", (
+            "CRC check failed. The recording likely contains noise, "
+            "clock drift, or a mismatched device selection."
+        )
+    return payload, ""
 
 
 def _tone(symbol_freq: float, n: int = SYMBOL_SAMPLES) -> np.ndarray:
@@ -122,7 +134,6 @@ def detect_bit(block: np.ndarray) -> str:
     """Classify a symbol-sized block into '0' or '1'."""
     if block.size == 0:
         return "0"
-    # Remove DC component.
     block = np.asarray(block, dtype=np.float64)
     block = block - np.mean(block)
     p0 = goertzel_power(block, FREQ_0)
@@ -139,12 +150,16 @@ def audio_to_bits(audio: np.ndarray) -> str:
     if audio.size < SYMBOL_SAMPLES:
         return ""
 
+    # Normalize lightly to improve the chance of decoding across different device gains.
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak > 0:
+        audio = audio / peak
+
     # Search for the best alignment by matching the known preamble.
     best_offset = 0
     best_score = -1
     preamble_len = len(PREAMBLE_BITS)
 
-    # A simple brute-force phase search; fast enough for small recordings.
     max_offset = min(SYMBOL_SAMPLES, audio.size)
     for offset in range(max_offset):
         score = 0
@@ -162,7 +177,6 @@ def audio_to_bits(audio: np.ndarray) -> str:
             if score == preamble_len:
                 break
 
-    # Decode from the best phase.
     bits: list[str] = []
     pos = best_offset
     while pos + SYMBOL_SAMPLES <= audio.size:

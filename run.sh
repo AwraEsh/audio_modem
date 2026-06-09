@@ -14,6 +14,25 @@ if [ ! -d "$VENV" ]; then
   "$PYTHON_BIN" -m venv "$VENV"
 fi
 
-"$VENV/bin/python" -m pip install --upgrade pip
+"$VENV/bin/python" -m pip install --upgrade pip >/dev/null
 "$VENV/bin/python" -m pip install -r "$ROOT/requirements.txt"
+
+if [[ "$(uname -s)" == "Linux" ]]; then
+  if ! "$VENV/bin/python" - <<'PY' >/dev/null 2>&1
+import tkinter  # noqa: F401
+import sounddevice  # noqa: F401
+PY
+  then
+    echo ""
+    echo "Some system audio dependencies appear to be missing."
+    if command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+      echo "Trying to install common Debian/Ubuntu packages..."
+      sudo apt-get update
+      sudo apt-get install -y python3-tk portaudio19-dev libportaudio2 ffmpeg
+    else
+      echo "Install these packages manually if needed: python3-tk, portaudio19-dev, libportaudio2, ffmpeg"
+    fi
+  fi
+fi
+
 "$VENV/bin/python" "$ROOT/launcher.py"
