@@ -1,21 +1,27 @@
-# Audio Modem (simple prototype)
+# Audio Modem
 
-A tiny local-only text ↔ audio demo.
+A tiny local-only text ↔ audio demo with a simple GUI.
 
 ## Files
-- `launcher.py` — menu window
+- `launcher.py` — mode chooser
 - `sender.py` — text → voice
 - `receiver.py` — voice → text
 - `common.py` — shared modem logic
-- `audio_backend.py` — playback/recording backends
+- `audio_backend.py` — playback/recording backends and device enumeration
 - `run.sh` — Linux/macOS launcher
 - `run.bat` — Windows launcher
 
+## Features
+- English-only UI text
+- Optional input/output device selection
+- Local-only processing
+- CRC-protected frames for more stable decoding
+- Fallback playback/recording paths when `sounddevice` is unavailable
+
 ## Notes
-- Uses `numpy`.
-- `sounddevice` is optional now.
-- On Linux, if `sounddevice` fails because PortAudio is missing, the app falls back to `ffmpeg/ffplay` when available.
-- It is intentionally simple, not production-grade.
+- `sounddevice` needs PortAudio.
+- On Linux, if PortAudio is missing, install the system package for it and rerun the app.
+- `tkinter` must be available in the system Python installation.
 
 ## Run
 ### Linux/macOS
