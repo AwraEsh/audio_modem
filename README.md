@@ -7,13 +7,15 @@ A tiny local-only text ↔ audio demo.
 - `sender.py` — text → voice
 - `receiver.py` — voice → text
 - `common.py` — shared modem logic
+- `audio_backend.py` — playback/recording backends
 - `run.sh` — Linux/macOS launcher
 - `run.bat` — Windows launcher
 
 ## Notes
-- Uses `numpy` and `sounddevice`.
+- Uses `numpy`.
+- `sounddevice` is optional now.
+- On Linux, if `sounddevice` fails because PortAudio is missing, the app falls back to `ffmpeg/ffplay` when available.
 - It is intentionally simple, not production-grade.
-- On Linux, `tkinter` and audio backend packages may need to be installed by the system.
 
 ## Run
 ### Linux/macOS
