@@ -29,21 +29,39 @@ def configure_dark_theme(root: tk.Tk) -> None:
     style.configure("TLabel", background=BG, foreground=TEXT)
     style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"), foreground=TEXT)
     style.configure("Subtitle.TLabel", font=("Segoe UI", 10), foreground=MUTED)
-    style.configure("TLabelFrame", background=BG, foreground=TEXT, bordercolor=BORDER)
-    style.configure("TLabelframe.Label", background=BG, foreground=TEXT)
-    style.configure("TButton", padding=(12, 7), font=("Segoe UI", 10))
-    style.map("TButton", background=[("active", PANEL)])
-    style.configure("TRadiobutton", background=BG, foreground=TEXT)
-    style.map("TRadiobutton", foreground=[("active", TEXT)])
-    style.configure("TCheckbutton", background=BG, foreground=TEXT)
-    style.map("TCheckbutton", foreground=[("active", TEXT)])
-    style.configure("TEntry", fieldbackground=ENTRY, foreground=TEXT, insertcolor=TEXT)
-    style.configure("TCombobox", fieldbackground=ENTRY, foreground=TEXT, insertcolor=TEXT)
+    
+    # LabelFrame با حاشیه بهتر
+    style.configure("TLabelFrame", background=BG, foreground=TEXT, bordercolor=BORDER, borderwidth=1, relief="solid")
+    style.configure("TLabelframe.Label", background=BG, foreground=TEXT, font=("Segoe UI", 10, "bold"))
+    
+    # دکمه با padding مناسب و تغییر رنگ در hover
+    style.configure("TButton", padding=(12, 7), font=("Segoe UI", 10), borderwidth=1, relief="solid")
+    style.map("TButton",
+              background=[("active", PANEL), ("pressed", "#2a2f3a")],
+              bordercolor=[("active", ACCENT)])
+    
+    style.configure("TRadiobutton", background=BG, foreground=TEXT, font=("Segoe UI", 10))
+    style.map("TRadiobutton", foreground=[("active", ACCENT)])
+    
+    style.configure("TCheckbutton", background=BG, foreground=TEXT, font=("Segoe UI", 10))
+    style.map("TCheckbutton", foreground=[("active", ACCENT)])
+    
+    style.configure("TEntry", fieldbackground=ENTRY, foreground=TEXT, insertcolor=TEXT, borderwidth=1, relief="solid")
+    style.configure("TCombobox", fieldbackground=ENTRY, foreground=TEXT, insertcolor=TEXT, borderwidth=1, relief="solid")
     style.map("TCombobox", fieldbackground=[("readonly", ENTRY)], selectbackground=[("readonly", SELECT)])
+    
     style.configure("TSeparator", background=BORDER)
-    style.configure("Dark.Horizontal.TProgressbar", troughcolor=PANEL, background=ACCENT, bordercolor=PANEL, lightcolor=ACCENT, darkcolor=ACCENT)
+    style.configure("Dark.Horizontal.TProgressbar", troughcolor=PANEL, background=ACCENT, bordercolor=PANEL, lightcolor=ACCENT, darkcolor=ACCENT, thickness=8)
 
-    # Keep standard dialogs readable.
+    # برای اسکرولبار
+    style.configure("Vertical.TScrollbar", background=PANEL, troughcolor=BG, borderwidth=0, arrowcolor=TEXT)
+    
+    # OptionMenu (در صورت استفاده)
+    root.option_add("*TCombobox*Listbox.background", ENTRY)
+    root.option_add("*TCombobox*Listbox.foreground", TEXT)
+    root.option_add("*TCombobox*Listbox.selectBackground", SELECT)
+
+    # دیالوگ‌های سیستمی
     root.option_add("*Dialog.msg.font", "Segoe UI 10")
     root.option_add("*Dialog.msg.foreground", TEXT)
     root.option_add("*Dialog.background", BG)

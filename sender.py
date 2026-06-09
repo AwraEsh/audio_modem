@@ -124,6 +124,10 @@ class SenderApp:
         ttk.Label(container, textvariable=self.backend_var).pack(anchor="w")
         ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(4, 0))
 
+        credit_frame = ttk.Frame(container)
+        credit_frame.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(credit_frame, text="Made by Aw", style="Subtitle.TLabel", foreground="#5a6378").pack(side=tk.RIGHT)
+        
         self._set_save_enabled(False)
 
     def _backend_note(self) -> str:
@@ -174,15 +178,23 @@ class SenderApp:
     def _selected_device(self) -> int | None:
         return self.device_map.get(self.output_device_var.get())
 
+    # در متد open_settings سندر، به جای کد قبلی:
     def open_settings(self) -> None:
-        updated = SettingsDialog(self.root, "Sender Settings", self.settings, SENDER_FIELDS).show()
+        default_settings = clamp_settings(ModemSettings())  # مقدار پیش‌فرض واقعی
+        updated = SettingsDialog(
+            self.root,
+            "Sender Settings",
+            self.settings,
+            default_settings,
+            SENDER_FIELDS
+        ).show()
         if updated is None:
             return
         self.settings = clamp_settings(updated)
         self.backend_var.set(self._backend_note())
         self.refresh_devices()
         self.status_var.set("Settings updated.")
-
+        
     def transmit(self) -> None:
         text = self.text_box.get("1.0", tk.END).strip()
         if not text:
