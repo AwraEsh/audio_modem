@@ -31,6 +31,19 @@ than
 run.bat
 ```
 
+## ScreenShots
+
+the launcher:
+<img width="642" height="479" alt="image" src="https://github.com/user-attachments/assets/2e230deb-b4e9-41d8-98a9-8043817c769b" />
+
+sender
+<img width="962" height="973" alt="image" src="https://github.com/user-attachments/assets/58cf9726-e1e4-4be8-b0a0-9f4127d4337f" />
+
+reciver
+<img width="1082" height="963" alt="image" src="https://github.com/user-attachments/assets/e134bc9f-7eed-46bf-854c-3cf4d424f236" />
+
+
+
 ## Notes
 
 - The live microphone features need `sounddevice` and PortAudio.
