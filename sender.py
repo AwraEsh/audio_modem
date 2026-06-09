@@ -4,12 +4,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
-from audio_backend import (
-    AudioBackendError,
-    list_audio_devices,
-    play_audio,
-    sounddevice_available,
-)
+from audio_backend import AudioBackendError, list_audio_devices, play_audio, sounddevice_available
 from common import SAMPLE_RATE, build_frame_bits, bits_to_audio, text_to_payload
 from ui_theme import configure_dark_theme
 
@@ -18,8 +13,8 @@ class SenderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Audio Modem — Text to Voice")
-        self.root.geometry("860x640")
-        self.root.minsize(760, 560)
+        self.root.geometry("900x660")
+        self.root.minsize(800, 580)
 
         configure_dark_theme(root)
 
@@ -101,9 +96,7 @@ class SenderApp:
         return "Audio backend: fallback playback is available, but device selection is limited without sounddevice."
 
     def refresh_devices(self) -> None:
-        show_advanced = self.advanced_var.get()
-        devices = list_audio_devices("output", advanced=show_advanced)
-
+        devices = list_audio_devices("output", advanced=self.advanced_var.get())
         values: list[str] = ["System default output"]
         self.device_map = {"System default output": None}
 
@@ -116,9 +109,7 @@ class SenderApp:
         self.output_combo.set("System default output")
 
         if len(values) == 1:
-            self.status_var.set(
-                "No selectable output devices were found. System default will be used if available."
-            )
+            self.status_var.set("No selectable output devices were found. System default will be used if available.")
         else:
             self.status_var.set(f"Found {len(values) - 1} output device(s).")
 

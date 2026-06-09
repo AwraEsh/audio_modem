@@ -1,38 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$(dirname "$0")"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="$ROOT/.venv"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "python3 not found. Install Python 3 first."
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 not found"
   exit 1
 fi
 
-if [ ! -d "$VENV" ]; then
-  "$PYTHON_BIN" -m venv "$VENV"
+if [ ! -d .venv ]; then
+  python3 -m venv .venv
 fi
 
-"$VENV/bin/python" -m pip install --upgrade pip >/dev/null
-"$VENV/bin/python" -m pip install -r "$ROOT/requirements.txt"
-
-if [[ "$(uname -s)" == "Linux" ]]; then
-  if ! "$VENV/bin/python" - <<'PY' >/dev/null 2>&1
-import tkinter  # noqa: F401
-import sounddevice  # noqa: F401
-PY
-  then
-    echo ""
-    echo "Some system dependencies may be missing."
-    if command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-      echo "Trying common Debian/Ubuntu packages..."
-      sudo apt-get update
-      sudo apt-get install -y python3-tk portaudio19-dev libportaudio2 ffmpeg
-    else
-      echo "Install these packages manually if needed: python3-tk, portaudio19-dev, libportaudio2, ffmpeg"
-    fi
-  fi
-fi
-
-"$VENV/bin/python" "$ROOT/launcher.py"
+# shellcheck disable=SC1091
+source .venv/bin/activate
+python -m pip install --upgrade pip >/dev/null
+python -m pip install -r requirements.txt
+python launcher.py

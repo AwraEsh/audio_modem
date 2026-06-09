@@ -20,7 +20,7 @@ def launch(script_name: str) -> None:
 
 root = tk.Tk()
 root.title("Audio Modem")
-root.geometry("460x300")
+root.geometry("480x300")
 root.resizable(False, False)
 
 configure_dark_theme(root)
@@ -36,9 +36,9 @@ ttk.Button(frame, text="Voice to Text", command=lambda: launch("receiver.py")).p
 
 ttk.Label(
     frame,
-    text="Tip: enable \"Show advanced devices\" only if the clean list is missing your hardware.",
+    text="Tip: keep the transmitter and receiver close at first to validate the sync and levels.",
     style="Subtitle.TLabel",
-    wraplength=400,
+    wraplength=410,
     justify="center",
 ).pack(anchor="center", pady=(20, 0))
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import contextlib
 import os
 from pathlib import Path
 import shutil
@@ -44,8 +43,8 @@ class AudioDevice:
             role.append("out")
         role_text = "/".join(role) if role else "io"
         if self.hostapi:
-            return f"{self.name}  —  {self.hostapi}  ({role_text})"
-        return f"{self.name}  —  ({role_text})"
+            return f"{self.name} — {self.hostapi} ({role_text})"
+        return f"{self.name} ({role_text})"
 
 
 def _load_sounddevice():
@@ -73,37 +72,29 @@ def _hostapi_name(sd, hostapi_index: int | None) -> str:
 
 
 def _looks_like_junk_device(name: str, hostapi: str) -> bool:
-    """
-    Hide the noisy Linux/ALSA entries by default.
-    Advanced mode can still show them.
-    """
     n = name.strip().lower()
     h = hostapi.strip().lower()
 
-    # Common "real" user-facing backends are allowed through.
-    if "pipewire" in h or "pulse" in h or "core audio" in h or "wasapi" in h:
+    if any(tag in h for tag in ("pipewire", "pulse", "core audio", "wasapi", "directsound", "mme")):
         return False
 
-    if "alsa" in h:
-        junk_prefixes = (
-            "default",
-            "sysdefault",
-            "front:",
-            "surround",
-            "null",
-            "pulse",
-            "hw:",
-            "plughw:",
-            "dmix",
-            "dsnoop",
-            "jack",
-            "loopback",
-        )
-        if n.startswith(junk_prefixes):
-            return True
-        if "loopback" in n:
-            return True
-
+    junk_prefixes = (
+        "default",
+        "sysdefault",
+        "front:",
+        "surround",
+        "null",
+        "pulse",
+        "hw:",
+        "plughw:",
+        "dmix",
+        "dsnoop",
+        "jack",
+        "loopback",
+    )
+    junk_terms = ("dummy", "monitor", "virtual", "blackhole")
+    if n.startswith(junk_prefixes) or any(term in n for term in junk_terms):
+        return True
     return False
 
 
@@ -119,11 +110,7 @@ def _device_is_usable(sd, device_index: int, kind: str, samplerate: int = SAMPLE
 
 
 def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = SAMPLE_RATE) -> list[AudioDevice]:
-    """
-    Return a cleaned list of devices for the requested direction.
-    - kind: 'input' or 'output'
-    - advanced=False hides the Linux ALSA clutter by default
-    """
+    """Return a cleaned list of devices for the requested direction."""
     sd = _load_sounddevice()
     if sd is None:
         return []
@@ -131,12 +118,12 @@ def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = S
     if kind not in {"input", "output"}:
         raise ValueError("kind must be 'input' or 'output'")
 
-    devices: list[AudioDevice] = []
     try:
         raw_devices = sd.query_devices()
     except Exception:
         return []
 
+    devices: list[AudioDevice] = []
     for idx, info in enumerate(raw_devices):
         max_in = int(info.get("max_input_channels", 0) or 0)
         max_out = int(info.get("max_output_channels", 0) or 0)
@@ -151,7 +138,6 @@ def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = S
 
         if not advanced and _looks_like_junk_device(name, hostapi):
             continue
-
         if not _device_is_usable(sd, idx, kind, samplerate=samplerate):
             continue
 
@@ -165,7 +151,6 @@ def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = S
             )
         )
 
-    # Reduce duplicates in normal mode. Prefer the more user-facing backend.
     if not advanced:
         priority = {
             "pipewire": 0,
@@ -178,7 +163,6 @@ def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = S
             "jack": 4,
             "": 5,
         }
-
         chosen: dict[str, AudioDevice] = {}
         for dev in devices:
             key = dev.name.strip().lower()
@@ -190,7 +174,6 @@ def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = S
             current_rank = priority.get(current.hostapi.strip().lower(), 6)
             if rank < current_rank:
                 chosen[key] = dev
-
         devices = sorted(chosen.values(), key=lambda d: (priority.get(d.hostapi.strip().lower(), 6), d.name.lower()))
 
     return devices
@@ -232,7 +215,7 @@ def create_input_stream(*, samplerate: int = SAMPLE_RATE, device: int | None = N
     sd = _load_sounddevice()
     if sd is None:
         raise AudioBackendError(
-            "sounddevice is not available. Install PortAudio and the sounddevice Python package for live input."
+            "Live microphone preview needs sounddevice and PortAudio."
         )
 
     kwargs = {
@@ -257,10 +240,7 @@ def create_input_stream(*, samplerate: int = SAMPLE_RATE, device: int | None = N
 def play_audio(audio: np.ndarray, *, samplerate: int = SAMPLE_RATE, device: int | None = None) -> str:
     sd = _load_sounddevice()
     if sd is not None:
-        kwargs = {
-            "samplerate": samplerate,
-            "blocking": True,
-        }
+        kwargs = {"samplerate": samplerate, "blocking": True}
         if device is not None:
             kwargs["device"] = device
         try:
@@ -314,10 +294,7 @@ def play_audio(audio: np.ndarray, *, samplerate: int = SAMPLE_RATE, device: int 
 
 
 class Recorder:
-    """
-    A small recorder wrapper that prefers sounddevice, but can fall back to ffmpeg on Linux.
-    Live preview and live decode work only when sounddevice is available.
-    """
+    """Recorder wrapper that prefers sounddevice, with a Linux ffmpeg fallback."""
 
     def __init__(self, *, samplerate: int = SAMPLE_RATE, device: int | None = None) -> None:
         self.samplerate = samplerate
@@ -369,7 +346,6 @@ class Recorder:
                 ) from exc
             return
 
-        # Linux fallback: record from the default PulseAudio/PipeWire source if present.
         fd, name = tempfile.mkstemp(prefix="audio_modem_rec_", suffix=".wav")
         os.close(fd)
         self._temp_path = Path(name)
@@ -411,9 +387,9 @@ class Recorder:
 
         try:
             try:
-                self._ffmpeg_proc.send_signal(subprocess.signal.SIGINT)  # type: ignore[attr-defined]
-            except Exception:
                 self._ffmpeg_proc.terminate()
+            except Exception:
+                pass
 
             try:
                 self._ffmpeg_proc.wait(timeout=5)
@@ -423,8 +399,7 @@ class Recorder:
 
             if not self._temp_path.exists() or self._temp_path.stat().st_size == 0:
                 raise AudioBackendError(
-                    "The fallback recorder did not produce any audio. "
-                    "On Linux, make sure ffmpeg can see your default microphone source."
+                    "The fallback recorder did not produce any audio. On Linux, make sure ffmpeg can see your default microphone source."
                 )
             return read_wav(self._temp_path)
         finally:

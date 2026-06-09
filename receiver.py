@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import threading
-import time
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 import numpy as np
 
 from audio_backend import AudioBackendError, Recorder, create_input_stream, list_audio_devices, sounddevice_available
-from common import SAMPLE_RATE, audio_to_bits, decode_audio_to_text, parse_frame_bits, summarize_audio_length
+from common import SAMPLE_RATE, decode_audio_to_text, summarize_audio_length
 from ui_theme import configure_dark_theme
 
 
@@ -16,19 +15,22 @@ class ReceiverApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Audio Modem — Voice to Text")
-        self.root.geometry("980x760")
-        self.root.minsize(880, 640)
+        self.root.geometry("1040x780")
+        self.root.minsize(920, 660)
 
         configure_dark_theme(root)
 
         self.advanced_var = tk.BooleanVar(value=False)
-        self.live_decode_var = tk.BooleanVar(value=True)
+        self.live_mode_var = tk.BooleanVar(value=True)
 
         self.status_var = tk.StringVar(
-            value="Choose an input device, press Preview or Start Listening, then transmit from the other side."
+            value="Choose an input device, press Preview to verify the mic, then use Live or Manual mode."
         )
         self.backend_var = tk.StringVar(value=self._backend_note())
         self.level_text_var = tk.StringVar(value="Mic level: idle")
+        self.preview_hint_var = tk.StringVar(value="Preview is off.")
+        self.mode_hint_var = tk.StringVar(value="Live mode enabled.")
+
         self.device_map: dict[str, int | None] = {}
         self.selected_device_id: int | None = None
 
@@ -44,10 +46,10 @@ class ReceiverApp:
         self._latest_peak = 0.0
         self._decode_thread_running = False
         self._last_live_text = ""
-        self._preview_token = 0
 
         self._build_ui()
         self.refresh_devices()
+        self._sync_mode_ui()
         self._schedule_meter_update()
 
     def _build_ui(self) -> None:
@@ -86,29 +88,40 @@ class ReceiverApp:
         self.meter = ttk.Progressbar(meter_frame, style="Dark.Horizontal.TProgressbar", mode="determinate", maximum=100.0)
         self.meter.pack(fill=tk.X)
         ttk.Label(meter_frame, textvariable=self.level_text_var).pack(anchor="w", pady=(4, 0))
+        ttk.Label(meter_frame, textvariable=self.preview_hint_var, style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
+
+        mode_frame = ttk.LabelFrame(container, text="Decode Mode", padding=12)
+        mode_frame.pack(fill=tk.X, pady=(0, 12))
+
+        ttk.Radiobutton(
+            mode_frame,
+            text="Live decode",
+            value=True,
+            variable=self.live_mode_var,
+            command=self._sync_mode_ui,
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            mode_frame,
+            text="Manual record",
+            value=False,
+            variable=self.live_mode_var,
+            command=self._sync_mode_ui,
+        ).pack(side=tk.LEFT, padx=(18, 0))
+        ttk.Label(mode_frame, textvariable=self.mode_hint_var, style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
 
         control_frame = ttk.Frame(container)
         control_frame.pack(fill=tk.X, pady=(0, 12))
 
-        self.preview_button = ttk.Button(control_frame, text="Start Preview", command=self.start_preview)
+        self.preview_button = ttk.Button(control_frame, text="Start Preview", command=self.toggle_preview)
         self.preview_button.pack(side=tk.LEFT)
-
-        self.stop_preview_button = ttk.Button(control_frame, text="Stop Preview", command=self.stop_preview, state="disabled")
-        self.stop_preview_button.pack(side=tk.LEFT, padx=(8, 0))
 
         self.start_button = ttk.Button(control_frame, text="Start Listening", command=self.start_listening)
         self.start_button.pack(side=tk.LEFT, padx=(18, 0))
 
-        self.stop_button = ttk.Button(control_frame, text="Stop and Decode", command=self.stop_and_decode, state="disabled")
+        self.stop_button = ttk.Button(control_frame, text="Stop and Decode", command=self.stop_and_decode)
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
-        ttk.Checkbutton(
-            control_frame,
-            text="Live decode",
-            variable=self.live_decode_var,
-        ).pack(side=tk.LEFT, padx=(18, 0))
-
-        ttk.Button(control_frame, text="Clear", command=self.clear_output).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(control_frame, text="Clear", command=self.clear_output).pack(side=tk.LEFT, padx=(18, 0))
 
         output_frame = ttk.LabelFrame(container, text="Decoded Text", padding=12)
         output_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
@@ -139,9 +152,7 @@ class ReceiverApp:
         return "Audio backend: fallback recording is available, but preview/live decode need sounddevice."
 
     def refresh_devices(self) -> None:
-        show_advanced = self.advanced_var.get()
-        devices = list_audio_devices("input", advanced=show_advanced)
-
+        devices = list_audio_devices("input", advanced=self.advanced_var.get())
         values: list[str] = ["System default input"]
         self.device_map = {"System default input": None}
 
@@ -194,6 +205,24 @@ class ReceiverApp:
 
         self.root.after(80, self._schedule_meter_update)
 
+    def _sync_mode_ui(self) -> None:
+        live_mode = self.live_mode_var.get()
+        if live_mode:
+            self.mode_hint_var.set("Live mode enabled.")
+            self.start_button.configure(text="Start Live Listening")
+            self.stop_button.configure(text="Stop Live")
+        else:
+            self.mode_hint_var.set("Manual mode enabled.")
+            self.start_button.configure(text="Start Listening")
+            self.stop_button.configure(text="Stop and Decode")
+
+        if self.listening_active:
+            self.start_button.configure(state="disabled")
+            self.stop_button.configure(state="normal")
+        else:
+            self.start_button.configure(state="normal")
+            self.stop_button.configure(state="disabled")
+
     def _open_device(self) -> int | None:
         chosen = self.input_device_var.get().strip()
         return self.device_map.get(chosen)
@@ -213,14 +242,19 @@ class ReceiverApp:
                 chunk = mono.copy()
                 with self._capture_lock:
                     self._captured_chunks.append(chunk)
-                    # Keep the buffer finite so live decode stays fast.
                     total = sum(part.size for part in self._captured_chunks)
-                    limit = int(SAMPLE_RATE * 18)
+                    limit = int(SAMPLE_RATE * 12)
                     while total > limit and self._captured_chunks:
                         removed = self._captured_chunks.pop(0)
                         total -= removed.size
 
         return _callback
+
+    def toggle_preview(self) -> None:
+        if self.preview_active:
+            self.stop_preview()
+            return
+        self.start_preview()
 
     def start_preview(self) -> None:
         if self.preview_active or self.listening_active:
@@ -249,12 +283,10 @@ class ReceiverApp:
             return
 
         self.preview_active = True
-        self._preview_token += 1
-        self.preview_button.configure(state="disabled")
-        self.stop_preview_button.configure(state="normal")
-        self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="disabled")
+        self.preview_button.configure(text="Stop Preview")
         self.status_var.set("Preview running. Speak into the selected microphone to check the level meter.")
+        self.preview_hint_var.set("Preview is on.")
+        self._sync_mode_ui()
 
     def stop_preview(self) -> None:
         if not self.preview_active:
@@ -269,11 +301,10 @@ class ReceiverApp:
                 pass
             self._preview_stream = None
 
-        self.preview_button.configure(state="normal")
-        self.stop_preview_button.configure(state="disabled")
-        self.start_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+        self.preview_button.configure(text="Start Preview")
+        self.preview_hint_var.set("Preview is off.")
         self.status_var.set("Preview stopped.")
+        self._sync_mode_ui()
 
     def start_listening(self) -> None:
         if self.listening_active:
@@ -284,8 +315,8 @@ class ReceiverApp:
 
         chosen = self._open_device()
         self.selected_device_id = chosen
-
         self._captured_chunks = []
+        self._last_live_text = ""
 
         if sounddevice_available():
             try:
@@ -310,22 +341,16 @@ class ReceiverApp:
                 return
 
         self.listening_active = True
-        self._last_live_text = ""
-        self.preview_button.configure(state="disabled")
-        self.stop_preview_button.configure(state="disabled")
-        self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="normal")
+        self._sync_mode_ui()
 
-        if self.live_decode_var.get() and sounddevice_available():
+        if self.live_mode_var.get() and sounddevice_available():
             self.status_var.set(f"Listening with live decode enabled. Backend: {backend_name}.")
+            self._schedule_live_decode()
         else:
             self.status_var.set(f"Listening... Backend: {backend_name}. Press Stop and Decode when done.")
 
-        if self.live_decode_var.get() and sounddevice_available():
-            self._schedule_live_decode()
-
     def _schedule_live_decode(self) -> None:
-        if not self.listening_active or not self.live_decode_var.get():
+        if not self.listening_active or not self.live_mode_var.get():
             return
         if self._decode_thread_running:
             self.root.after(180, self._schedule_live_decode)
@@ -343,7 +368,6 @@ class ReceiverApp:
             try:
                 text, error = decode_audio_to_text(snapshot)
                 if text is None:
-                    # Keep the UI quiet while the sync word has not shown up yet.
                     if "CRC" not in error and "Sync word" not in error and "incomplete" not in error.lower():
                         self._set_status(f"Listening... {error}")
                     return
@@ -351,12 +375,10 @@ class ReceiverApp:
                 if text != self._last_live_text:
                     self._last_live_text = text
                     self._set_output(text)
-                    self._set_status(
-                        f"Live decode successful — recorded {summarize_audio_length(snapshot)}."
-                    )
+                    self._set_status(f"Live decode successful — recorded {summarize_audio_length(snapshot)}.")
             finally:
                 self._decode_thread_running = False
-                if self.listening_active and self.live_decode_var.get():
+                if self.listening_active and self.live_mode_var.get():
                     self.root.after(180, self._schedule_live_decode)
 
         threading.Thread(target=worker, args=(audio,), daemon=True).start()
@@ -367,12 +389,7 @@ class ReceiverApp:
             return
 
         self.listening_active = False
-
-        self.preview_button.configure(state="normal")
-        self.stop_preview_button.configure(state="disabled")
-        self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="disabled")
-
+        self._sync_mode_ui()
         self.status_var.set("Stopping capture and decoding...")
 
         def worker() -> None:
@@ -390,6 +407,8 @@ class ReceiverApp:
                 else:
                     audio = np.empty(0, dtype=np.float32)
 
+                self.recorder = None
+
                 if audio.size == 0:
                     raise RuntimeError("No audio was recorded.")
 
@@ -405,9 +424,6 @@ class ReceiverApp:
             finally:
                 self.root.after(0, lambda: self.start_button.configure(state="normal"))
                 self.root.after(0, lambda: self.stop_button.configure(state="disabled"))
-                self.root.after(0, lambda: self.preview_button.configure(state="normal"))
-                self.root.after(0, lambda: self.stop_preview_button.configure(state="disabled"))
-                self.recorder = None
 
         threading.Thread(target=worker, daemon=True).start()
 
