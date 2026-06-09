@@ -1,9 +1,9 @@
-"""Audio backends, device enumeration, and safe fallback helpers."""
+"""Audio backends, device listing and safe fallbacks."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import sys
@@ -12,7 +12,7 @@ import wave
 
 import numpy as np
 
-from common import SAMPLE_RATE
+from common import DEFAULT_SAMPLE_RATE, ModemSettings, clamp_settings
 
 
 class AudioBackendError(RuntimeError):
@@ -75,7 +75,7 @@ def _looks_like_junk_device(name: str, hostapi: str) -> bool:
     n = name.strip().lower()
     h = hostapi.strip().lower()
 
-    if any(tag in h for tag in ("pipewire", "pulse", "core audio", "wasapi", "directsound", "mme")):
+    if any(tag in h for tag in ("pipewire", "pulse", "core audio", "wasapi", "directsound", "mme", "alsa", "jack")):
         return False
 
     junk_prefixes = (
@@ -98,7 +98,7 @@ def _looks_like_junk_device(name: str, hostapi: str) -> bool:
     return False
 
 
-def _device_is_usable(sd, device_index: int, kind: str, samplerate: int = SAMPLE_RATE) -> bool:
+def _device_is_usable(sd, device_index: int, kind: str, samplerate: int = DEFAULT_SAMPLE_RATE) -> bool:
     try:
         if kind == "input":
             sd.check_input_settings(device=device_index, channels=1, samplerate=samplerate, dtype="float32")
@@ -109,7 +109,7 @@ def _device_is_usable(sd, device_index: int, kind: str, samplerate: int = SAMPLE
         return False
 
 
-def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = SAMPLE_RATE) -> list[AudioDevice]:
+def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = DEFAULT_SAMPLE_RATE) -> list[AudioDevice]:
     """Return a cleaned list of devices for the requested direction."""
     sd = _load_sounddevice()
     if sd is None:
@@ -175,69 +175,37 @@ def list_audio_devices(kind: str, *, advanced: bool = False, samplerate: int = S
             if rank < current_rank:
                 chosen[key] = dev
         devices = sorted(chosen.values(), key=lambda d: (priority.get(d.hostapi.strip().lower(), 6), d.name.lower()))
+    else:
+        devices = sorted(devices, key=lambda d: (d.name.lower(), d.hostapi.lower()))
 
     return devices
 
 
-def _to_int16(audio: np.ndarray) -> np.ndarray:
-    audio = np.asarray(audio, dtype=np.float32)
-    if audio.ndim > 1:
-        audio = np.mean(audio, axis=1)
-    audio = np.clip(audio, -1.0, 1.0)
-    return (audio * 32767.0).astype(np.int16)
-
-
-def write_wav(path: str | Path, audio: np.ndarray, samplerate: int = SAMPLE_RATE) -> None:
-    data = _to_int16(audio)
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(samplerate)
-        wav.writeframes(data.tobytes())
-
-
-def read_wav(path: str | Path) -> np.ndarray:
-    with wave.open(str(path), "rb") as wav:
-        channels = wav.getnchannels()
-        sampwidth = wav.getsampwidth()
-        frames = wav.readframes(wav.getnframes())
-
-    if sampwidth != 2:
-        raise AudioBackendError(f"Unsupported WAV sample width: {sampwidth * 8} bit")
-
-    audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
-    if channels > 1:
-        audio = audio.reshape(-1, channels).mean(axis=1)
-    return audio
-
-
-def create_input_stream(*, samplerate: int = SAMPLE_RATE, device: int | None = None, callback=None):
+def create_input_stream(*, samplerate: int, device: int | None, callback):
     sd = _load_sounddevice()
     if sd is None:
         raise AudioBackendError(
-            "Live microphone preview needs sounddevice and PortAudio."
+            "Live input requires sounddevice / PortAudio. Install the system PortAudio package and sounddevice."
         )
-
     kwargs = {
         "channels": 1,
         "samplerate": samplerate,
         "dtype": "float32",
-        "blocksize": 0,
         "callback": callback,
+        "blocksize": 0,
     }
     if device is not None:
         kwargs["device"] = device
-
     try:
         return sd.InputStream(**kwargs)
     except Exception as exc:
         raise AudioBackendError(
             f"Could not open the selected input device. {exc}\n\n"
-            "Check OS microphone permissions and make sure the device is not busy."
+            "If the app needs permission, allow microphone access and try another device."
         ) from exc
 
 
-def play_audio(audio: np.ndarray, *, samplerate: int = SAMPLE_RATE, device: int | None = None) -> str:
+def play_audio(audio: np.ndarray, *, samplerate: int, device: int | None = None) -> str:
     sd = _load_sounddevice()
     if sd is not None:
         kwargs = {"samplerate": samplerate, "blocking": True}
@@ -250,7 +218,7 @@ def play_audio(audio: np.ndarray, *, samplerate: int = SAMPLE_RATE, device: int 
         except Exception as exc:
             raise AudioBackendError(
                 f"Playback failed on the selected output device. {exc}\n\n"
-                "If the device is unavailable, select another one or use System Default."
+                "Choose another output device or use the system default."
             ) from exc
 
     if sys.platform.startswith("linux"):
@@ -258,7 +226,7 @@ def play_audio(audio: np.ndarray, *, samplerate: int = SAMPLE_RATE, device: int 
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 temp_path = Path(tmp.name)
             try:
-                write_wav(temp_path, audio, samplerate=samplerate)
+                write_wav_file(temp_path, audio, samplerate=samplerate)
                 subprocess.run(
                     ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(temp_path)],
                     check=True,
@@ -280,7 +248,7 @@ def play_audio(audio: np.ndarray, *, samplerate: int = SAMPLE_RATE, device: int 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             temp_path = Path(tmp.name)
         try:
-            write_wav(temp_path, audio, samplerate=samplerate)
+            write_wav_file(temp_path, audio, samplerate=samplerate)
             winsound.PlaySound(str(temp_path), winsound.SND_FILENAME)
             return "winsound"
         except Exception as exc:
@@ -289,14 +257,60 @@ def play_audio(audio: np.ndarray, *, samplerate: int = SAMPLE_RATE, device: int 
             temp_path.unlink(missing_ok=True)
 
     raise AudioBackendError(
-        "No playback backend could be found. Install sounddevice with PortAudio, or on Linux install ffplay."
+        "No playback backend could be found. Install sounddevice/PortAudio or Linux ffplay."
     )
+
+
+def write_wav_file(path: str | Path, audio: np.ndarray, *, samplerate: int) -> None:
+    path = Path(path)
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
+    audio = np.clip(np.nan_to_num(audio, copy=False), -1.0, 1.0)
+
+    pcm = (audio * 32767.0).astype(np.int16)
+
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(int(samplerate))
+        wav.writeframes(pcm.tobytes())
+
+
+def read_wav_file(path: str | Path) -> np.ndarray:
+    path = Path(path)
+    with wave.open(str(path), "rb") as wav:
+        channels = wav.getnchannels()
+        width = wav.getsampwidth()
+        frames = wav.readframes(wav.getnframes())
+        rate = wav.getframerate()
+
+    if width == 1:
+        data = np.frombuffer(frames, dtype=np.uint8).astype(np.float32)
+        data = (data - 128.0) / 128.0
+    elif width == 2:
+        data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    elif width == 4:
+        data = np.frombuffer(frames, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        raise AudioBackendError(f"Unsupported WAV sample width: {width} bytes")
+
+    if channels > 1:
+        data = data.reshape(-1, channels).mean(axis=1)
+
+    if rate != DEFAULT_SAMPLE_RATE:
+        # Keep the app predictable. We do not resample silently.
+        raise AudioBackendError(
+            f"Audio file sample rate is {rate} Hz, but the modem expects {DEFAULT_SAMPLE_RATE} Hz WAV files."
+        )
+
+    return data.astype(np.float32, copy=False)
 
 
 class Recorder:
     """Recorder wrapper that prefers sounddevice, with a Linux ffmpeg fallback."""
 
-    def __init__(self, *, samplerate: int = SAMPLE_RATE, device: int | None = None) -> None:
+    def __init__(self, *, samplerate: int = DEFAULT_SAMPLE_RATE, device: int | None = None) -> None:
         self.samplerate = samplerate
         self.device = device
         self._sd = _load_sounddevice()
@@ -312,7 +326,7 @@ class Recorder:
         if sys.platform.startswith("linux") and shutil.which("ffmpeg"):
             return "ffmpeg"
         raise AudioBackendError(
-            "No usable recording backend found. Install sounddevice/PortAudio, or use Linux with ffmpeg."
+            "No usable recording backend found. Install sounddevice/PortAudio, or on Linux install ffmpeg."
         )
 
     @property
@@ -324,7 +338,10 @@ class Recorder:
             self._frames = []
 
             def _callback(indata, frames, time, status):  # noqa: ANN001
-                del frames, time, status
+                del frames, time
+                if status:
+                    # Never crash on callback status warnings.
+                    pass
                 self._frames.append(indata.copy())
 
             kwargs = {
@@ -342,7 +359,7 @@ class Recorder:
             except Exception as exc:
                 raise AudioBackendError(
                     f"Could not open the selected input device. {exc}\n\n"
-                    "Check microphone permissions and device availability."
+                    "Check microphone access and try another device."
                 ) from exc
             return
 
@@ -350,14 +367,12 @@ class Recorder:
         os.close(fd)
         self._temp_path = Path(name)
 
-        candidates = []
-        if shutil.which("ffmpeg"):
-            candidates = [
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "pulse", "-i", "default",
-                 "-ac", "1", "-ar", str(self.samplerate), str(self._temp_path)],
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "alsa", "-i", "default",
-                 "-ac", "1", "-ar", str(self.samplerate), str(self._temp_path)],
-            ]
+        candidates = [
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "pulse", "-i", "default",
+             "-ac", "1", "-ar", str(self.samplerate), str(self._temp_path)],
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "alsa", "-i", "default",
+             "-ac", "1", "-ar", str(self.samplerate), str(self._temp_path)],
+        ]
 
         last_error: Exception | None = None
         for cmd in candidates:
@@ -399,9 +414,9 @@ class Recorder:
 
             if not self._temp_path.exists() or self._temp_path.stat().st_size == 0:
                 raise AudioBackendError(
-                    "The fallback recorder did not produce any audio. On Linux, make sure ffmpeg can see your default microphone source."
+                    "The fallback recorder did not produce any audio. On Linux, make sure ffmpeg can see your microphone."
                 )
-            return read_wav(self._temp_path)
+            return read_wav_file(self._temp_path)
         finally:
             self._ffmpeg_proc = None
             if self._temp_path is not None:

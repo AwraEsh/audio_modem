@@ -1,14 +1,42 @@
 # Audio Modem
 
-A small local-only text ↔ voice demo built with Python, Tkinter, and a simple FSK modem.
+A small local text ↔ audio modem built with Tkinter, NumPy, and SoundDevice.
 
-## Notes
-- `sounddevice` + PortAudio are required for live preview and live decode.
-- On Linux, playback/recording can fall back to `ffplay` / `ffmpeg` when available.
-- The receiver has two modes:
-  - **Live decode**: the capture stays open and decodes while audio is coming in.
-  - **Manual record**: record first, then decode when you stop.
+## Features
+
+- Text to WAV / speaker output
+- WAV / microphone to text
+- Dark-mode UI
+- Output and input device selection
+- Settings popups with short explanations
+- Live preview for the selected microphone
+- Live decode mode or manual record mode
+- Save the generated waveform as a WAV file
+- Decode from an audio file
 
 ## Run
-- Linux/macOS: `./run.sh`
-- Windows: `run.bat`
+
+### Linux
+open a terminal on projects folder than:
+```bash
+sudo chmod +x .
+```
+than
+```bash
+./run.sh
+```
+
+### Windows
+```bat
+run.bat
+```
+
+## Notes
+
+- The live microphone features need `sounddevice` and PortAudio.
+- The app can still decode WAV files even if live input is unavailable.
+- Use the same modem settings on both sender and receiver.
+
+
+
+Enjoy!
