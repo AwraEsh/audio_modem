@@ -5,8 +5,8 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext
 
 import numpy as np
-import sounddevice as sd
 
+from audio_backend import AudioBackendError, Recorder
 from common import audio_to_bits, parse_frame_bits, summarize_audio_length
 
 
@@ -18,16 +18,14 @@ class ReceiverApp:
 
         self.status_var = tk.StringVar(value="Start listening, then transmit from the other side.")
         self.recording = False
-        self.stream: sd.InputStream | None = None
-        self.frames: list[np.ndarray] = []
-        self.lock = threading.Lock()
+        self.recorder: Recorder | None = None
 
         tk.Label(root, text="Voice to Text", font=("Arial", 18, "bold")).pack(pady=(12, 6))
         tk.Label(
             root,
             text=(
-                "روی Start listening بزن، بعد سمت فرستنده را اجرا کن. وقتی پیام تمام شد روی Stop and Decode بزن.\n"
-                "این نسخه ساده است و همه‌چیز لوکال انجام می‌شود."
+                "click the start lis.. shit and when the message endedm that that end of somshit butt.\n"
+                "this shi is local and simple."
             ),
             wraplength=680,
             justify="center",
@@ -52,48 +50,39 @@ class ReceiverApp:
         self.output.insert("1.0", "Decoded text will appear here.\n")
         self.output.configure(state=tk.DISABLED)
 
-    def _callback(self, indata, frames, time, status):  # noqa: ANN001
-        if status:
-            # Keep collecting; sounddevice may report overflow warnings.
-            pass
-        with self.lock:
-            self.frames.append(indata.copy())
-
     def start_listening(self) -> None:
         if self.recording:
             return
         try:
-            self.frames = []
-            self.stream = sd.InputStream(channels=1, samplerate=44100, callback=self._callback)
-            self.stream.start()
+            self.recorder = Recorder()
+            self.recorder.start()
             self.recording = True
-            self.status_var.set("در حال ضبط... حالا از سمت فرستنده ارسال کن.")
+            self.status_var.set(f"recording... backend={self.recorder.mode}. now run it from the sender side.")
+        except AudioBackendError as exc:
+            messagebox.showerror(
+                "Record error",
+                f"{exc}\n\nروی لینوکس، اگر sounddevice کار نکند، ffmpeg باید بتواند از میکروفون پیش‌فرض ضبط کند."
+            )
         except Exception as exc:  # pragma: no cover
-            messagebox.showerror("Record error", f"{exc}\n\nاگر microphone access یا sound backend مشکل دارد، اول آن را درست کن.")
+            messagebox.showerror("Record error", str(exc))
 
     def stop_and_decode(self) -> None:
-        if not self.recording:
-            messagebox.showinfo("Not recording", "اول Start listening را بزن.")
+        if not self.recording or self.recorder is None:
+            messagebox.showinfo("Not recording", "first click the Start listening botton")
             return
 
         self.recording = False
-        if self.stream is not None:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception:
-                pass
-            self.stream = None
+        recorder = self.recorder
+        self.recorder = None
 
-        self.status_var.set("در حال decode...")
+        self.status_var.set(" decoding....")
         self.root.update_idletasks()
 
         def worker() -> None:
             try:
-                with self.lock:
-                    if not self.frames:
-                        raise RuntimeError("هیچ صدایی ضبط نشد.")
-                    audio = np.concatenate(self.frames, axis=0).reshape(-1)
+                audio = recorder.stop()
+                if audio.size == 0:
+                    raise RuntimeError("no sound has recorded bitch.")
 
                 bits = audio_to_bits(audio)
                 payload, err = parse_frame_bits(bits)
@@ -107,7 +96,7 @@ class ReceiverApp:
                 self.output.configure(state=tk.DISABLED)
 
                 self.status_var.set(
-                    f"Decode successful — recorded {summarize_audio_length(audio)}. پیام بالا باز شد."
+                    f"Decode successful — recorded {summarize_audio_length(audio)}. backend={recorder.mode}."
                 )
             except Exception as exc:  # pragma: no cover
                 self.status_var.set("Decode failed.")

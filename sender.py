@@ -4,10 +4,8 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
 
-import numpy as np
-import sounddevice as sd
-
-from common import build_frame_bits, bits_to_audio, payload_to_text, text_to_payload
+from audio_backend import AudioBackendError, play_audio
+from common import SAMPLE_RATE, build_frame_bits, bits_to_audio, text_to_payload
 
 
 class SenderApp:
@@ -16,12 +14,12 @@ class SenderApp:
         self.root.title("Audio Modem — Text → Voice")
         self.root.geometry("640x420")
 
-        self.status_var = tk.StringVar(value="یک متن بنویس و روی Transmit بزن.")
+        self.status_var = tk.StringVar(value="write a text and hit that transmit kilid")
 
         tk.Label(root, text="Text to Voice", font=("Arial", 18, "bold")).pack(pady=(12, 6))
         tk.Label(
             root,
-            text="متن را با UTF-8 به صدا تبدیل می‌کند. گیرنده باید روی Voice → Text گوش بدهد.",
+            text="i transmit the text with UTF8 to voice and the reciver should use Voice → Text",
             wraplength=600,
             justify="center",
         ).pack(pady=(0, 10))
@@ -43,10 +41,10 @@ class SenderApp:
     def transmit(self) -> None:
         text = self.text_box.get("1.0", tk.END).rstrip("\n")
         if not text.strip():
-            messagebox.showwarning("Empty text", "یه چیزی بنویس اول 😭")
+            messagebox.showwarning("Empty text", "dud just write somthin first 😭")
             return
 
-        self.status_var.set("در حال ساخت سیگنال...")
+        self.status_var.set("im cooking the signal...")
         self.root.update_idletasks()
 
         try:
@@ -60,13 +58,19 @@ class SenderApp:
         def worker() -> None:
             try:
                 self.status_var.set(
-                    f"در حال پخش {len(payload)} بایت دیتا... اسپیکر یا AUX رو وصل کن."
+                    f"playing {len(payload)} bytes of data. connect the speaker or the AUX cable"
                 )
-                sd.play(audio, samplerate=44100, blocking=True)
-                self.status_var.set("پایان ارسال. طرف مقابل باید پیام را بگیرد.")
+                backend = play_audio(audio, samplerate=SAMPLE_RATE)
+                self.status_var.set(f"end of sending. backend={backend}. that other dude should recive the message now.")
+            except AudioBackendError as exc:
+                self.status_var.set("i coudnt play the sound.")
+                messagebox.showerror(
+                    "Playback error",
+                    f"{exc}\n\nif u dont have this on linux : sounddevice ، ffplay should be installed."
+                )
             except Exception as exc:  # pragma: no cover
-                self.status_var.set("خطا در پخش صدا.")
-                messagebox.showerror("Playback error", f"{exc}\n\nاگر sounddevice نصب است، احتمالاً بک‌اند صوتی سیستم مشکل دارد.")
+                self.status_var.set("i coudnt play the sound.")
+                messagebox.showerror("Playback error", str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
