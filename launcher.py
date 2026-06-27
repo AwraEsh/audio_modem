@@ -11,7 +11,7 @@ from ui_theme import configure_dark_theme
 ROOT = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
-
+# defs
 def launch(script_name: str) -> None:
     script = ROOT / script_name
     if script.exists():
