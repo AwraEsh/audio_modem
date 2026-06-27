@@ -1,4 +1,4 @@
-"""Audio backends, device listing and safe fallbacks."""
+"""Audio backends, device listing and safe fallbackz."""
 from __future__ import annotations
 
 from dataclasses import dataclass
